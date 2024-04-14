@@ -49,7 +49,7 @@ class TransactionGroup:
     def getNetProceeds(self):
         ret = 0
         for transaction in self.transactions:
-            ret += (transaction.soldAmount() - transaction.soldCommissions)
+            ret += (transaction.convertedSoldAmount() - transaction.soldCommissions)
         return ret
 
     def getCostBasis(self):
@@ -61,19 +61,22 @@ class TransactionGroup:
     def getNetCostBasis(self):
         ret = 0
         for transaction in self.transactions:
-            ret += (transaction.boughtAmount() - transaction.boughtCommissions)
+            ret += (transaction.convertedBoughtAmount() + transaction.boughtCommissions)
         return ret
 
     def getNetGainLoss(self):
         return self.getNetProceeds() - self.getNetCostBasis()
-
-    def print(self):
-        print("{},{},{},{},{}".format(self.getSecurity(), self.getUnitsSold(),
-                                   self.getNetCostBasis(), self.getProceeds(),
+        
+    def writeToFile(self):
+        f = open("output.csv", "a")
+        f.write("{},{},{},{},{}\n".format(self.getSecurity(), self.getUnitsSold(),
+                                   self.getNetCostBasis(), self.getNetProceeds(),
                                    self.getNetGainLoss()))
+        f.close()
 
 class RawTransaction:
     line = ""
+    currency = ""
     security = ""
     commissions = 0.0
     boughtCommissions = 0.0
@@ -94,10 +97,11 @@ class RawTransaction:
     normalized_security = ""
 
     def __init__(self, line):
-        self.line = line
+        self.line = line.strip()
         parts = line.split(',')
         self.isValid = isValidTransactionLine(parts)
         if self.isValid:
+            self.currency = getCurrencyFromLineParts(parts)
             self.security = getSecurityFromLineParts(parts)
             self.normalized_security = self.security
             self.commissions = getCommissionsFromLineParts(parts)
@@ -118,10 +122,11 @@ class RawTransaction:
                 self.option_expiry_day = self.security[8:].strip().split()[1].split("@")[0].strip().zfill(4)[:2]
                 self.option_expiry_month = self.security[8:].strip().split()[1].split("@")[0].strip().zfill(4)[2:]
                 self.option_expiry_strike = self.security[8:].strip().split()[1].split("@")[1].strip()
-                self.normalized_security = "{}--{}--{}--{}--{}".format(self.option_type,
+                self.normalized_security = "{}--{}--{}--{}--{}--{}".format(self.option_type,
                                                                            self.option_ticker,
                                                                            self.option_expiry_year,
                                                                            self.option_expiry_month,
+                                                                           self.option_expiry_day,
                                                                            self.option_expiry_strike)
 
     def isBuy(self):
@@ -137,48 +142,26 @@ class RawTransaction:
         return "PUT" in self.security or "CALL" in self.security
 
     def boughtAmount(self):
-        return self.cost - self.commissions
+        multiplier = 1
+        if self.isOption():
+            multiplier = 100
+        return self.price * self.unitsBought * multiplier
 
     def convertedBoughtAmount(self):
-        return self.boughtAmount() * self.dailyExchangeRate
+        if self.currency == "USD":
+            return self.boughtAmount() * self.dailyExchangeRate
+        return self.boughtAmount()
 
     def soldAmount(self):
-        return self.proceeds - self.commissions
+        multiplier = 1
+        if self.isOption():
+            multiplier = 100
+        return self.price * self.unitsSold * multiplier
 
     def convertedSoldAmount(self):
-        return self.soldAmount() * self.dailyExchangeRate
-
-monthsMap = {
-    "JAN": "01",
-    "FEB": "02",
-    "MAR": "03",
-    "APR": "04",
-    "MAY": "05",
-    "JUN": "06",
-    "JUL": "07",
-    "AUG": "08",
-    "SEP": "09",
-    "OCT": "10",
-    "NOV": "11",
-    "DEC": "12",
-}
-
-securitiesMap = {}
-remainingMap = {}
-
-# Retrieved from https://www.bankofcanada.ca/valet/series/FXUSDCAD/csv
-fx_file = open('FXUSDCAD.csv', 'r')
-fx_lines = fx_file.readlines()
-
-#transactions_file = open('Tax-Document_3879J6CAD_Investment-Income---Trading-Summary--csv---Mar-19--2022_2021.csv', 'r')
-transactions_file = open('Tax-Document_3879J6USD_Investment-Income---Trading-Summary--csv---Mar-19--2022_2021.csv', 'r')
-transactions_lines = transactions_file.readlines()
-
-extras_file = open('extras.csv', 'r')
-extras_lines = extras_file.readlines()
-
-excludes_file = open('excludes.txt', 'r')
-excludes_lines = excludes_file.readlines()
+        if self.currency == "USD":
+            return self.soldAmount() * self.dailyExchangeRate
+        return self.soldAmount()
 
 
 def getExchangeRateForDayFromLineParts(parts):
@@ -201,7 +184,7 @@ def getExchangeRateForDay(year, month, day):
         return getExchangeRateForDay(year, month, str(int(day) - 1))
 
 def addToSecuritiesMap(rawTransaction):
-    if rawTransaction.security not in excludes_lines:
+    if rawTransaction.line not in excludes_lines:
         if (rawTransaction.normalized_security in securitiesMap):
             securitiesMap[rawTransaction.normalized_security].append(rawTransaction.line)
         else:
@@ -228,8 +211,22 @@ def getAmountSold(security):
     return accumulatedAmountSold
 
 
+def getAmountBought(security):
+    accumulatedAmountBought = 0.0
+    for line in securitiesMap.get(security):
+        parts = line.split(',')
+        if (len(parts) >= 3):
+            amountBought = 0 if parts[4].strip() == "" else parts[4].strip()
+            accumulatedAmountBought += float(amountBought)
+    return accumulatedAmountBought
+
+
 def getSecurityFromLineParts(parts):
     return parts[3].replace('"', '').strip()
+
+
+def getCurrencyFromLineParts(parts):
+    return parts[1].replace('"', '').strip()
 
 
 def getTransactionDateFromLineParts(parts):
@@ -268,14 +265,19 @@ def isValidTransactionLine(parts):
             return True
     return False
 
+def writeOutputLine(line):
+    f = open("output.csv", "a")
+    f.write(line.strip() + '\n')
+    f.close()
 
 def processSecurity(normalized_security):
+    if 'SP--255' in normalized_security:
+        print(normalized_security)
     transaction_group = TransactionGroup()
     targetAmountSold = getAmountSold(normalized_security)
     accumulatedBoughtShareCount = 0.0
     if targetAmountSold > 0:
         for line in securitiesMap.get(normalized_security):
-            print(line.strip())
             rawTransaction = RawTransaction(line)
             if rawTransaction.isValid:
                 if (accumulatedBoughtShareCount >= targetAmountSold):
@@ -285,28 +287,82 @@ def processSecurity(normalized_security):
                     transaction_group.appendTransaction(rawTransaction)
                     if (rawTransaction.unitsBought > 0):
                         accumulatedBoughtShareCount += rawTransaction.unitsBought
-        transaction_group.print()
+        transaction_group.writeToFile()
+
 
 def printOptionParts(security):
     for line in securitiesMap.get(security):
         rawTransaction = RawTransaction(line)
         if rawTransaction.isOption():
-            print("{}  --  {}".format(rawTransaction.security, rawTransaction.normalized_security))
+            writeOutputLine("{}  --  {}".format(rawTransaction.security, rawTransaction.normalized_security))
 
-def printOddOptions(normalized_security):
-    security_compare = ""
-    for line in securitiesMap.get(normalized_security):
-        rawTransaction = RawTransaction(line)
-        if security_compare == "":
-            security_compare = rawTransaction.security
-        else:
-            if rawTransaction.security != security_compare:
-                print("{} -- {}".format(rawTransaction.security, security_compare))
 
-print("SECURITY, SHARES, COST BASIS, PROCEEDS, GAIN/LOSS")
+def printOptionsNeverSold(securitiesMap):
+    for normalized_security in securitiesMap:
+        for line in securitiesMap.get(normalized_security):
+            rawTransaction = RawTransaction(line)
+            if rawTransaction.isOption():
+                if getAmountSold(normalized_security) == 0:
+                    print('this option was never sold: ' + rawTransaction.normalized_security)
+
+
+def printOptionsNeverBought(securitiesMap):
+    for normalized_security in securitiesMap:
+        for line in securitiesMap.get(normalized_security):
+            rawTransaction = RawTransaction(line)
+            if rawTransaction.isOption():
+                if getAmountBought(normalized_security) == 0:
+                    print('this option was never bought: ' + rawTransaction.normalized_security)
+
+def printOptionsBuySellMismatch(securitiesMap):
+    for normalized_security in securitiesMap:
+        boughtAmount = getAmountBought(normalized_security)
+        soldAmount = getAmountSold(normalized_security)
+        if boughtAmount != soldAmount:
+            print('buy sell amount mismatch: ' + normalized_security)
+
+
+monthsMap = {
+    "JAN": "01",
+    "FEB": "02",
+    "MAR": "03",
+    "APR": "04",
+    "MAY": "05",
+    "JUN": "06",
+    "JUL": "07",
+    "AUG": "08",
+    "SEP": "09",
+    "OCT": "10",
+    "NOV": "11",
+    "DEC": "12",
+}
+
+securitiesMap = {}
+remainingMap = {}
+
+# Retrieved from https://www.bankofcanada.ca/valet/series/FXUSDCAD/csv
+fx_file = open('FXUSDCAD.csv', 'r')
+fx_lines = fx_file.readlines()
+
+transactions_file = open('Tax-Document_3879J6USD_Investment-Income---Trading-Summary--csv---Feb-28--2024_2023.csv', 'r')
+#ransactions_file = open('Tax-Document_3879J6CAD_Investment-Income---Trading-Summary--csv---Feb-28--2024_2023.csv', 'r')
+#transactions_file = open('temp.csv', 'r')
+transactions_lines = transactions_file.readlines()
+
+extras_file = open('extras.csv', 'r')
+extras_lines = extras_file.readlines()
+
+excludes_file = open('excludes.csv', 'r')
+excludes_lines = excludes_file.readlines()
+
+writeOutputLine("SECURITY, SHARES, COST BASIS, PROCEEDS, GAIN/LOSS")
 processSecuritiesToDictionary()
-for security in securitiesMap:
-    processSecurity(security)
+printOptionsNeverSold(securitiesMap)
+printOptionsNeverBought(securitiesMap)
+printOptionsBuySellMismatch(securitiesMap)
+
+for normalized_security in securitiesMap:
+    processSecurity(normalized_security)
 #processSecurity("CALL--TSLA--22--JA--1100")
 #processSecurity("CALL--TSLA--21--AG--730")
 #processSecurity("CALL--TSLA--21--AG--720")
